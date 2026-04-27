@@ -1,0 +1,26 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  lint:
+    uses: berkayakkocc/shared-workflows/.github/workflows/lint.yml@main
+    secrets: inherit
+
+  test:
+    uses: berkayakkocc/shared-workflows/.github/workflows/test.yml@main
+    secrets: inherit
+
+  security:
+    uses: berkayakkocc/shared-workflows/.github/workflows/security-scan.yml@main
+    secrets: inherit
+
+  context:
+    needs: [lint, test]
+    uses: berkayakkocc/shared-workflows/.github/workflows/update-context.yml@main
+    secrets: inherit

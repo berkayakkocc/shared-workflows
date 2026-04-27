@@ -1,0 +1,9 @@
+[package]
+name = "{{PROJECT_SLUG}}"
+version = "0.1.0"
+edition = "2021"
+description = "{{DESCRIPTION}}"
+
+[dependencies]
+
+[dev-dependencies]

@@ -1,0 +1,16 @@
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+build/
+.pub-cache/
+.pub/
+*.class
+*.log
+local.properties
+android/.gradle/
+android/captures/
+android/local.properties
+ios/.symlinks/
+ios/Pods/
+ios/Flutter/flutter_export_environment.sh

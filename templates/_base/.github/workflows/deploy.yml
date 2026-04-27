@@ -1,0 +1,24 @@
+name: Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Hedef ortam'
+        required: true
+        default: production
+        type: choice
+        options: [production, staging]
+      target:
+        description: 'Deploy hedefi'
+        required: true
+        type: choice
+        options: [vercel, firebase, docker, ssh, azure]
+
+jobs:
+  deploy:
+    uses: berkayakkocc/shared-workflows/.github/workflows/deploy.yml@main
+    with:
+      target: ${{ inputs.target }}
+      environment: ${{ inputs.environment }}
+    secrets: inherit
