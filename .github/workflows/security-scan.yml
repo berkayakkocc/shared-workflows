@@ -1,0 +1,203 @@
+name: Security Scan (Reusable)
+
+on:
+  workflow_call:
+    inputs:
+      project_type:
+        required: false
+        type: string
+        default: auto       # auto | node | flutter | python | dotnet | go | rust | docker
+      node_version:
+        required: false
+        type: string
+        default: '20'
+      python_version:
+        required: false
+        type: string
+        default: '3.11'
+      dotnet_version:
+        required: false
+        type: string
+        default: '8.0.x'
+      docker_image:
+        required: false
+        type: string
+      fail_on_severity:
+        required: false
+        type: string
+        default: high       # low | medium | high | critical
+      working_directory:
+        required: false
+        type: string
+        default: '.'
+    secrets:
+      SNYK_TOKEN:
+        required: false
+
+jobs:
+  security:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ inputs.working_directory }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Detect project type
+        id: detect
+        shell: bash
+        run: |
+          INPUT="${{ inputs.project_type }}"
+          WD="${{ inputs.working_directory }}"
+          if [ "$INPUT" != "auto" ]; then
+            echo "type=$INPUT" >> $GITHUB_OUTPUT
+            echo "Resolved: $INPUT (from input)"
+            exit 0
+          fi
+          if   [ -f "$WD/pubspec.yaml" ]; then                                              T=flutter
+          elif [ -f "$WD/package.json" ]; then                                              T=node
+          elif [ -f "$WD/requirements.txt" ] || [ -f "$WD/pyproject.toml" ] || [ -f "$WD/setup.py" ]; then T=python
+          elif find "$WD" -maxdepth 3 \( -name "*.csproj" -o -name "*.sln" \) 2>/dev/null | grep -q .; then T=dotnet
+          elif [ -f "$WD/go.mod" ]; then                                                    T=go
+          elif [ -f "$WD/Cargo.toml" ]; then                                                T=rust
+          else T=unknown; fi
+          echo "type=$T" >> $GITHUB_OUTPUT
+          echo "Detected: $T"
+
+      # Severity → Trivy filter string
+      - name: Resolve Trivy severity filter
+        id: sev
+        shell: bash
+        run: |
+          case "${{ inputs.fail_on_severity }}" in
+            low)      echo "filter=LOW,MEDIUM,HIGH,CRITICAL" >> $GITHUB_OUTPUT ;;
+            medium)   echo "filter=MEDIUM,HIGH,CRITICAL"     >> $GITHUB_OUTPUT ;;
+            critical) echo "filter=CRITICAL"                 >> $GITHUB_OUTPUT ;;
+            *)        echo "filter=HIGH,CRITICAL"            >> $GITHUB_OUTPUT ;;
+          esac
+
+      # ── Node — npm audit ──────────────────────────────────────────────────
+      - name: Setup Node
+        if: steps.detect.outputs.type == 'node'
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version }}
+          cache: npm
+
+      - name: npm audit
+        if: steps.detect.outputs.type == 'node'
+        run: |
+          npm ci
+          npm audit --audit-level=${{ inputs.fail_on_severity }}
+
+      # ── Flutter — dart pub audit ──────────────────────────────────────────
+      - name: Setup Flutter
+        if: steps.detect.outputs.type == 'flutter'
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+
+      - name: dart pub audit
+        if: steps.detect.outputs.type == 'flutter'
+        run: |
+          flutter pub get
+          dart pub audit
+
+      # ── Python — pip-audit ────────────────────────────────────────────────
+      - name: Setup Python
+        if: steps.detect.outputs.type == 'python'
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python_version }}
+          cache: pip
+
+      - name: pip-audit
+        if: steps.detect.outputs.type == 'python'
+        run: |
+          pip install pip-audit
+          pip install -r requirements.txt || true
+          pip-audit --desc
+
+      # ── .NET — dotnet list package --vulnerable ────────────────────────────
+      - name: Setup .NET
+        if: steps.detect.outputs.type == 'dotnet'
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ inputs.dotnet_version }}
+
+      - name: dotnet vulnerability scan
+        if: steps.detect.outputs.type == 'dotnet'
+        shell: bash
+        run: |
+          dotnet restore
+          RESULT=$(dotnet list package --vulnerable --include-transitive 2>&1)
+          echo "$RESULT"
+          if echo "$RESULT" | grep -q "has the following vulnerable packages"; then
+            SEV="${{ inputs.fail_on_severity }}"
+            if echo "$RESULT" | grep -qi "Critical" && [[ "$SEV" =~ ^(low|medium|high|critical)$ ]]; then exit 1; fi
+            if echo "$RESULT" | grep -qi "High"     && [[ "$SEV" =~ ^(low|medium|high)$ ]];         then exit 1; fi
+            if echo "$RESULT" | grep -qi "Medium"   && [[ "$SEV" =~ ^(low|medium)$ ]];              then exit 1; fi
+            if echo "$RESULT" | grep -qi "Low"      && [[ "$SEV" == "low" ]];                       then exit 1; fi
+          fi
+
+      # ── Go — govulncheck ──────────────────────────────────────────────────
+      - name: Setup Go
+        if: steps.detect.outputs.type == 'go'
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: govulncheck
+        if: steps.detect.outputs.type == 'go'
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
+
+      # ── Rust — cargo audit ────────────────────────────────────────────────
+      - name: Setup Rust
+        if: steps.detect.outputs.type == 'rust'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: cargo audit
+        if: steps.detect.outputs.type == 'rust'
+        run: |
+          cargo install cargo-audit
+          cargo audit
+
+      # ── Docker — Trivy image scan ─────────────────────────────────────────
+      - name: Trivy image scan
+        if: steps.detect.outputs.type == 'docker' && inputs.docker_image != ''
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ inputs.docker_image }}
+          format: table
+          exit-code: '1'
+          severity: ${{ steps.sev.outputs.filter }}
+
+      # ── Filesystem scan (tüm tipler) ──────────────────────────────────────
+      - name: Trivy filesystem scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: fs
+          scan-ref: ${{ inputs.working_directory }}
+          format: sarif
+          output: trivy-results.sarif
+          severity: ${{ steps.sev.outputs.filter }}
+          exit-code: '0'
+
+      - name: Upload SARIF to GitHub Security tab
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-results.sarif
+
+      # ── Snyk (opsiyonel) ──────────────────────────────────────────────────
+      - name: Snyk scan
+        if: secrets.SNYK_TOKEN != ''
+        uses: snyk/actions/node@master
+        continue-on-error: true
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        with:
+          args: --severity-threshold=${{ inputs.fail_on_severity }}
