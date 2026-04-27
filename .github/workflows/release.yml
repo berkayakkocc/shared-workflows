@@ -1,0 +1,206 @@
+name: Release (Reusable)
+
+on:
+  workflow_call:
+    inputs:
+      project_type:
+        required: false
+        type: string
+        default: auto       # auto | node | flutter | python | dotnet | go | rust
+      bump:
+        required: false
+        type: string
+        default: auto       # auto | major | minor | patch
+        # auto = conventional commits'e göre belirler
+      node_version:
+        required: false
+        type: string
+        default: '20'
+      dotnet_version:
+        required: false
+        type: string
+        default: '8.0.x'
+      working_directory:
+        required: false
+        type: string
+        default: '.'
+      draft:
+        required: false
+        type: boolean
+        default: false
+      prerelease:
+        required: false
+        type: boolean
+        default: false
+    secrets:
+      GH_PAT:
+        required: true
+    outputs:
+      version:
+        description: "Released version tag (e.g. v1.2.3)"
+        value: ${{ jobs.release.outputs.version }}
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.tag.outputs.version }}
+    defaults:
+      run:
+        working-directory: ${{ inputs.working_directory }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GH_PAT }}
+          fetch-depth: 0
+
+      - name: Detect project type
+        id: detect
+        shell: bash
+        run: |
+          INPUT="${{ inputs.project_type }}"
+          WD="${{ inputs.working_directory }}"
+          if [ "$INPUT" != "auto" ]; then
+            echo "type=$INPUT" >> $GITHUB_OUTPUT
+            echo "Resolved: $INPUT (from input)"
+            exit 0
+          fi
+          if   [ -f "$WD/pubspec.yaml" ]; then                                              T=flutter
+          elif [ -f "$WD/package.json" ]; then                                              T=node
+          elif [ -f "$WD/requirements.txt" ] || [ -f "$WD/pyproject.toml" ] || [ -f "$WD/setup.py" ]; then T=python
+          elif find "$WD" -maxdepth 3 \( -name "*.csproj" -o -name "*.sln" \) 2>/dev/null | grep -q .; then T=dotnet
+          elif [ -f "$WD/go.mod" ]; then                                                    T=go
+          elif [ -f "$WD/Cargo.toml" ]; then                                                T=rust
+          else T=unknown; fi
+          echo "type=$T" >> $GITHUB_OUTPUT
+          echo "Detected: $T"
+
+      # Conventional commits'den bump tipini otomatik belirle
+      - name: Determine bump type
+        id: bump_type
+        shell: bash
+        run: |
+          if [ "${{ inputs.bump }}" != "auto" ]; then
+            echo "type=${{ inputs.bump }}" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          LAST=$(git describe --tags --abbrev=0 2>/dev/null || git rev-list --max-parents=0 HEAD)
+          COMMITS=$(git log ${LAST}..HEAD --oneline 2>/dev/null || git log --oneline -20)
+          if echo "$COMMITS" | grep -qiE "(BREAKING CHANGE|!:)"; then
+            echo "type=major" >> $GITHUB_OUTPUT
+          elif echo "$COMMITS" | grep -qiE "^[a-f0-9]+ feat(\(.+\))?:"; then
+            echo "type=minor" >> $GITHUB_OUTPUT
+          else
+            echo "type=patch" >> $GITHUB_OUTPUT
+          fi
+
+      # Yeni versiyonu hesapla
+      - name: Calculate next version
+        id: tag
+        shell: bash
+        run: |
+          LAST=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
+          CLEAN=${LAST#v}
+          MAJOR=$(echo $CLEAN | cut -d. -f1)
+          MINOR=$(echo $CLEAN | cut -d. -f2)
+          PATCH=$(echo $CLEAN | cut -d. -f3 | cut -d- -f1)
+          case "${{ steps.bump_type.outputs.type }}" in
+            major) MAJOR=$((MAJOR+1)); MINOR=0; PATCH=0 ;;
+            minor) MINOR=$((MINOR+1)); PATCH=0 ;;
+            *)     PATCH=$((PATCH+1)) ;;
+          esac
+          VERSION="v${MAJOR}.${MINOR}.${PATCH}"
+          echo "version=$VERSION"         >> $GITHUB_OUTPUT
+          echo "clean=${MAJOR}.${MINOR}.${PATCH}" >> $GITHUB_OUTPUT
+          echo "last=$LAST"               >> $GITHUB_OUTPUT
+          echo "Next version: $VERSION (bump: ${{ steps.bump_type.outputs.type }})"
+
+      # ── Versiyon dosyasını güncelle ───────────────────────────────────────
+      - name: Setup Node (version bump)
+        if: steps.detect.outputs.type == 'node'
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version }}
+
+      - name: Bump version — package.json
+        if: steps.detect.outputs.type == 'node'
+        run: npm version ${{ steps.tag.outputs.clean }} --no-git-tag-version
+
+      - name: Bump version — pubspec.yaml
+        if: steps.detect.outputs.type == 'flutter'
+        shell: bash
+        run: sed -i "s/^version:.*/version: ${{ steps.tag.outputs.clean }}/" pubspec.yaml
+
+      - name: Bump version — pyproject.toml
+        if: steps.detect.outputs.type == 'python'
+        shell: bash
+        run: |
+          if [ -f pyproject.toml ]; then
+            sed -i 's/^version = .*/version = "${{ steps.tag.outputs.clean }}"/' pyproject.toml
+          fi
+
+      - name: Setup .NET (version bump)
+        if: steps.detect.outputs.type == 'dotnet'
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ inputs.dotnet_version }}
+
+      - name: Bump version — .csproj
+        if: steps.detect.outputs.type == 'dotnet'
+        shell: bash
+        run: |
+          for f in $(find . -maxdepth 3 -name "*.csproj"); do
+            sed -i 's|<Version>.*</Version>|<Version>${{ steps.tag.outputs.clean }}</Version>|' "$f"
+            if ! grep -q "<Version>" "$f"; then
+              sed -i 's|</PropertyGroup>|  <Version>${{ steps.tag.outputs.clean }}</Version>\n  </PropertyGroup>|' "$f"
+            fi
+          done
+
+      - name: Bump version — Cargo.toml
+        if: steps.detect.outputs.type == 'rust'
+        shell: bash
+        run: sed -i 's/^version = .*/version = "${{ steps.tag.outputs.clean }}"/' Cargo.toml
+
+      # Go: go.mod versiyonu yok, sadece tag yeterli
+      # ── Changelog ────────────────────────────────────────────────────────
+      - name: Generate changelog
+        id: changelog
+        shell: bash
+        run: |
+          LAST="${{ steps.tag.outputs.last }}"
+          if git rev-parse "$LAST" >/dev/null 2>&1; then RANGE="${LAST}..HEAD"; else RANGE="HEAD"; fi
+          FEATURES=$(git log $RANGE --oneline --grep="^feat"  2>/dev/null | sed 's/^/- /' || true)
+          FIXES=$(   git log $RANGE --oneline --grep="^fix"   2>/dev/null | sed 's/^/- /' || true)
+          OTHERS=$(  git log $RANGE --oneline 2>/dev/null | grep -vE "^[a-f0-9]+ (feat|fix|chore)" | head -20 | sed 's/^/- /' || true)
+          {
+            echo "body<<EOF"
+            [ -n "$FEATURES" ] && echo "### Features"     && echo "$FEATURES" && echo
+            [ -n "$FIXES"    ] && echo "### Bug Fixes"    && echo "$FIXES"    && echo
+            [ -n "$OTHERS"   ] && echo "### Other"        && echo "$OTHERS"
+            echo "EOF"
+          } >> $GITHUB_OUTPUT
+
+      - name: Commit version bump
+        shell: bash
+        run: |
+          git config user.name "Pipeline Bot"
+          git config user.email "bot@pipeline.com"
+          git add -A
+          git diff --staged --quiet && echo "Nothing to commit" && exit 0
+          git commit -m "chore: bump version to ${{ steps.tag.outputs.version }} [skip ci]"
+
+      - name: Create tag and push
+        run: |
+          git tag ${{ steps.tag.outputs.version }}
+          git push origin HEAD --follow-tags
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.version }}
+          name: ${{ steps.tag.outputs.version }}
+          body: ${{ steps.changelog.outputs.body }}
+          draft: ${{ inputs.draft }}
+          prerelease: ${{ inputs.prerelease }}
+          token: ${{ secrets.GH_PAT }}
