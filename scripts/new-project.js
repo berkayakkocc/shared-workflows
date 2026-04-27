@@ -173,17 +173,38 @@ async function main() {
     console.log('  ⚠ gh CLI bulunamadı — GitHub repo manuel oluşturulacak');
   }
 
+  // 7. GH_PAT secret'ını yeni repoya ekle
+  if (ghAvailable) {
+    let ghPat = process.env.GH_PAT || args.pat || '';
+    if (!ghPat) {
+      ghPat = await prompt('  GH_PAT token (boş bırakırsan atlanır): ');
+    }
+    if (ghPat) {
+      try {
+        execSync(
+          `gh secret set GH_PAT --repo ${GITHUB_USER}/${slug}`,
+          { input: ghPat, stdio: ['pipe', 'inherit', 'inherit'], cwd: outDir }
+        );
+        console.log('  ✓ GH_PAT secret eklendi — CI hazır');
+      } catch {
+        console.log('  ⚠ GH_PAT secret eklenemedi — manuel ekle');
+      }
+    } else {
+      console.log('  ⚠ GH_PAT atlandı — CI çalışmaz, sonradan ekle');
+    }
+  }
+
   const repoUrl = `https://github.com/${GITHUB_USER}/${slug}`;
   console.log(`\nHazır!\n  Lokal : ${outDir}\n  GitHub: ${ghAvailable ? repoUrl : '(manuel kurulacak)'}\n`);
-  console.log('Sonraki adımlar:');
   if (!ghAvailable) {
+    console.log('Sonraki adımlar:');
     console.log(`  1. GitHub'da "${slug}" adında repo aç`);
     console.log(`  2. git remote add origin <url> && git push -u origin main`);
     console.log('  3. Repo Secrets\'a GH_PAT ekle');
+    console.log('  → STATUS.md\'yi doldur, çalışmaya başla\n');
   } else {
-    console.log(`  1. ${repoUrl} → Settings → Secrets → GH_PAT ekle`);
+    console.log('  → STATUS.md\'yi doldur, çalışmaya başla\n');
   }
-  console.log('  → STATUS.md\'yi doldur, çalışmaya başla\n');
 }
 
 main().catch(err => { console.error(err); process.exit(1); });
