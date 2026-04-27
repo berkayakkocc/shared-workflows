@@ -1,0 +1,144 @@
+name: Lint (Reusable)
+
+on:
+  workflow_call:
+    inputs:
+      project_type:
+        required: false
+        type: string
+        default: auto       # auto | node | flutter | python | dotnet | go | rust
+      node_version:
+        required: false
+        type: string
+        default: '20'
+      python_version:
+        required: false
+        type: string
+        default: '3.11'
+      dotnet_version:
+        required: false
+        type: string
+        default: '8.0.x'
+      working_directory:
+        required: false
+        type: string
+        default: '.'
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ inputs.working_directory }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Detect project type
+        id: detect
+        shell: bash
+        run: |
+          INPUT="${{ inputs.project_type }}"
+          WD="${{ inputs.working_directory }}"
+          if [ "$INPUT" != "auto" ]; then
+            echo "type=$INPUT" >> $GITHUB_OUTPUT
+            echo "Resolved: $INPUT (from input)"
+            exit 0
+          fi
+          if   [ -f "$WD/pubspec.yaml" ]; then                                              T=flutter
+          elif [ -f "$WD/package.json" ]; then                                              T=node
+          elif [ -f "$WD/requirements.txt" ] || [ -f "$WD/pyproject.toml" ] || [ -f "$WD/setup.py" ]; then T=python
+          elif find "$WD" -maxdepth 3 \( -name "*.csproj" -o -name "*.sln" \) 2>/dev/null | grep -q .; then T=dotnet
+          elif [ -f "$WD/go.mod" ]; then                                                    T=go
+          elif [ -f "$WD/Cargo.toml" ]; then                                                T=rust
+          else T=unknown; fi
+          echo "type=$T" >> $GITHUB_OUTPUT
+          echo "Detected: $T"
+
+      # ── Node ──────────────────────────────────────────────────────────────
+      - name: Setup Node
+        if: steps.detect.outputs.type == 'node'
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version }}
+          cache: npm
+
+      - name: npm ci + ESLint + Prettier
+        if: steps.detect.outputs.type == 'node'
+        run: |
+          npm ci
+          npx eslint . --max-warnings=0
+          npx prettier --check .
+
+      # ── Flutter ───────────────────────────────────────────────────────────
+      - name: Setup Flutter
+        if: steps.detect.outputs.type == 'flutter'
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+
+      - name: flutter analyze + dart format check
+        if: steps.detect.outputs.type == 'flutter'
+        run: |
+          flutter analyze --fatal-infos
+          dart format --output=none --set-exit-if-changed .
+
+      # ── Python ────────────────────────────────────────────────────────────
+      - name: Setup Python
+        if: steps.detect.outputs.type == 'python'
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python_version }}
+          cache: pip
+
+      - name: ruff check + format
+        if: steps.detect.outputs.type == 'python'
+        run: |
+          pip install ruff
+          ruff check .
+          ruff format --check .
+
+      # ── .NET ──────────────────────────────────────────────────────────────
+      - name: Setup .NET
+        if: steps.detect.outputs.type == 'dotnet'
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ inputs.dotnet_version }}
+
+      - name: dotnet format check
+        if: steps.detect.outputs.type == 'dotnet'
+        run: dotnet format --verify-no-changes --severity warn
+
+      # ── Go ────────────────────────────────────────────────────────────────
+      - name: Setup Go
+        if: steps.detect.outputs.type == 'go'
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: golangci-lint
+        if: steps.detect.outputs.type == 'go'
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+
+      # ── Rust ──────────────────────────────────────────────────────────────
+      - name: Setup Rust
+        if: steps.detect.outputs.type == 'rust'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: cargo clippy + fmt check
+        if: steps.detect.outputs.type == 'rust'
+        run: |
+          cargo clippy -- -D warnings
+          cargo fmt --check
+
+      # ── Unknown ───────────────────────────────────────────────────────────
+      - name: Unknown project type
+        if: steps.detect.outputs.type == 'unknown'
+        run: |
+          echo "Could not detect project type."
+          echo "Set project_type input explicitly: node | flutter | python | dotnet | go | rust"
+          exit 1

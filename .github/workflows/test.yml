@@ -1,0 +1,187 @@
+name: Test (Reusable)
+
+on:
+  workflow_call:
+    inputs:
+      project_type:
+        required: false
+        type: string
+        default: auto       # auto | node | flutter | python | dotnet | go | rust
+      node_version:
+        required: false
+        type: string
+        default: '20'
+      python_version:
+        required: false
+        type: string
+        default: '3.11'
+      dotnet_version:
+        required: false
+        type: string
+        default: '8.0.x'
+      working_directory:
+        required: false
+        type: string
+        default: '.'
+      coverage:
+        required: false
+        type: boolean
+        default: false
+    secrets:
+      CODECOV_TOKEN:
+        required: false
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ inputs.working_directory }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Detect project type
+        id: detect
+        shell: bash
+        run: |
+          INPUT="${{ inputs.project_type }}"
+          WD="${{ inputs.working_directory }}"
+          if [ "$INPUT" != "auto" ]; then
+            echo "type=$INPUT" >> $GITHUB_OUTPUT
+            echo "Resolved: $INPUT (from input)"
+            exit 0
+          fi
+          if   [ -f "$WD/pubspec.yaml" ]; then                                              T=flutter
+          elif [ -f "$WD/package.json" ]; then                                              T=node
+          elif [ -f "$WD/requirements.txt" ] || [ -f "$WD/pyproject.toml" ] || [ -f "$WD/setup.py" ]; then T=python
+          elif find "$WD" -maxdepth 3 \( -name "*.csproj" -o -name "*.sln" \) 2>/dev/null | grep -q .; then T=dotnet
+          elif [ -f "$WD/go.mod" ]; then                                                    T=go
+          elif [ -f "$WD/Cargo.toml" ]; then                                                T=rust
+          else T=unknown; fi
+          echo "type=$T" >> $GITHUB_OUTPUT
+          echo "Detected: $T"
+
+      # ── Node ──────────────────────────────────────────────────────────────
+      - name: Setup Node
+        if: steps.detect.outputs.type == 'node'
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version }}
+          cache: npm
+
+      - name: npm ci
+        if: steps.detect.outputs.type == 'node'
+        run: npm ci
+
+      - name: npm test
+        if: steps.detect.outputs.type == 'node' && !inputs.coverage
+        run: npm test -- --passWithNoTests
+
+      - name: npm test (coverage)
+        if: steps.detect.outputs.type == 'node' && inputs.coverage
+        run: npm test -- --coverage --passWithNoTests
+
+      # ── Flutter ───────────────────────────────────────────────────────────
+      - name: Setup Flutter
+        if: steps.detect.outputs.type == 'flutter'
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+
+      - name: flutter pub get
+        if: steps.detect.outputs.type == 'flutter'
+        run: flutter pub get
+
+      - name: flutter test
+        if: steps.detect.outputs.type == 'flutter' && !inputs.coverage
+        run: flutter test
+
+      - name: flutter test (coverage)
+        if: steps.detect.outputs.type == 'flutter' && inputs.coverage
+        run: flutter test --coverage
+
+      # ── Python ────────────────────────────────────────────────────────────
+      - name: Setup Python
+        if: steps.detect.outputs.type == 'python'
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python_version }}
+          cache: pip
+
+      - name: Install deps + pytest
+        if: steps.detect.outputs.type == 'python'
+        run: |
+          pip install -r requirements.txt || true
+          pip install pytest pytest-cov
+
+      - name: pytest
+        if: steps.detect.outputs.type == 'python' && !inputs.coverage
+        run: pytest
+
+      - name: pytest (coverage)
+        if: steps.detect.outputs.type == 'python' && inputs.coverage
+        run: pytest --cov=. --cov-report=xml
+
+      # ── .NET ──────────────────────────────────────────────────────────────
+      - name: Setup .NET
+        if: steps.detect.outputs.type == 'dotnet'
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ inputs.dotnet_version }}
+
+      - name: dotnet restore
+        if: steps.detect.outputs.type == 'dotnet'
+        run: dotnet restore
+
+      - name: dotnet test
+        if: steps.detect.outputs.type == 'dotnet' && !inputs.coverage
+        run: dotnet test --no-restore --verbosity normal
+
+      - name: dotnet test (coverage)
+        if: steps.detect.outputs.type == 'dotnet' && inputs.coverage
+        run: |
+          dotnet test --no-restore \
+            --collect:"XPlat Code Coverage" \
+            --results-directory TestResults \
+            -- DataCollectionRunSettings.DataCollectors.DataCollector.Configuration.Format=cobertura
+
+      # ── Go ────────────────────────────────────────────────────────────────
+      - name: Setup Go
+        if: steps.detect.outputs.type == 'go'
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: go test
+        if: steps.detect.outputs.type == 'go' && !inputs.coverage
+        run: go test ./...
+
+      - name: go test (coverage)
+        if: steps.detect.outputs.type == 'go' && inputs.coverage
+        run: go test -coverprofile=coverage.out ./...
+
+      # ── Rust ──────────────────────────────────────────────────────────────
+      - name: Setup Rust
+        if: steps.detect.outputs.type == 'rust'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: cargo test
+        if: steps.detect.outputs.type == 'rust'
+        run: cargo test
+
+      # ── Coverage Upload ───────────────────────────────────────────────────
+      - name: Upload coverage to Codecov
+        if: inputs.coverage && secrets.CODECOV_TOKEN != ''
+        uses: codecov/codecov-action@v4
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: false
+
+      # ── Unknown ───────────────────────────────────────────────────────────
+      - name: Unknown project type
+        if: steps.detect.outputs.type == 'unknown'
+        run: |
+          echo "Could not detect project type."
+          echo "Set project_type input explicitly: node | flutter | python | dotnet | go | rust"
+          exit 1
