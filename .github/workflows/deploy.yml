@@ -1,0 +1,259 @@
+name: Deploy (Reusable)
+
+on:
+  workflow_call:
+    inputs:
+      target:
+        required: true
+        type: string        # vercel | firebase | docker | ssh | azure
+      project_type:
+        required: false
+        type: string
+        default: auto       # auto | node | flutter | python | dotnet | go | rust
+      environment:
+        required: false
+        type: string
+        default: production
+      node_version:
+        required: false
+        type: string
+        default: '20'
+      dotnet_version:
+        required: false
+        type: string
+        default: '8.0.x'
+      docker_image:
+        required: false
+        type: string        # e.g. ghcr.io/org/repo
+      docker_registry:
+        required: false
+        type: string
+        default: ghcr.io
+      ssh_host:
+        required: false
+        type: string
+      ssh_user:
+        required: false
+        type: string
+        default: deploy
+      ssh_deploy_path:
+        required: false
+        type: string
+        default: /srv/app
+      azure_app_name:
+        required: false
+        type: string
+      working_directory:
+        required: false
+        type: string
+        default: '.'
+    secrets:
+      VERCEL_TOKEN:
+        required: false
+      VERCEL_ORG_ID:
+        required: false
+      VERCEL_PROJECT_ID:
+        required: false
+      FIREBASE_SERVICE_ACCOUNT:
+        required: false
+      DOCKER_USERNAME:
+        required: false
+      DOCKER_PASSWORD:
+        required: false
+      SSH_PRIVATE_KEY:
+        required: false
+      AZURE_PUBLISH_PROFILE:
+        required: false
+
+jobs:
+  deploy:
+    name: Deploy → ${{ inputs.target }} (${{ inputs.environment }})
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    defaults:
+      run:
+        working-directory: ${{ inputs.working_directory }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Detect project type
+        id: detect
+        shell: bash
+        run: |
+          INPUT="${{ inputs.project_type }}"
+          WD="${{ inputs.working_directory }}"
+          if [ "$INPUT" != "auto" ]; then
+            echo "type=$INPUT" >> $GITHUB_OUTPUT
+            echo "Resolved: $INPUT (from input)"
+            exit 0
+          fi
+          if   [ -f "$WD/pubspec.yaml" ]; then                                              T=flutter
+          elif [ -f "$WD/package.json" ]; then                                              T=node
+          elif [ -f "$WD/requirements.txt" ] || [ -f "$WD/pyproject.toml" ] || [ -f "$WD/setup.py" ]; then T=python
+          elif find "$WD" -maxdepth 3 \( -name "*.csproj" -o -name "*.sln" \) 2>/dev/null | grep -q .; then T=dotnet
+          elif [ -f "$WD/go.mod" ]; then                                                    T=go
+          elif [ -f "$WD/Cargo.toml" ]; then                                                T=rust
+          else T=unknown; fi
+          echo "type=$T" >> $GITHUB_OUTPUT
+          echo "Detected: $T"
+
+      # ── Build step (per language) ─────────────────────────────────────────
+      - name: Setup Node
+        if: steps.detect.outputs.type == 'node'
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version }}
+          cache: npm
+
+      - name: Build (node)
+        if: steps.detect.outputs.type == 'node'
+        run: |
+          npm ci
+          npm run build --if-present
+
+      - name: Setup Flutter
+        if: steps.detect.outputs.type == 'flutter'
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+
+      - name: Build (flutter web)
+        if: steps.detect.outputs.type == 'flutter'
+        run: |
+          flutter pub get
+          flutter build web --release
+
+      - name: Setup Python
+        if: steps.detect.outputs.type == 'python'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install deps (python)
+        if: steps.detect.outputs.type == 'python'
+        run: pip install -r requirements.txt || true
+
+      - name: Setup .NET
+        if: steps.detect.outputs.type == 'dotnet'
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ inputs.dotnet_version }}
+
+      - name: Build (dotnet)
+        if: steps.detect.outputs.type == 'dotnet'
+        run: dotnet publish -c Release -o publish/
+
+      - name: Setup Go
+        if: steps.detect.outputs.type == 'go'
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build (go)
+        if: steps.detect.outputs.type == 'go'
+        run: go build -o ./dist/ ./...
+
+      - name: Setup Rust
+        if: steps.detect.outputs.type == 'rust'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build (rust)
+        if: steps.detect.outputs.type == 'rust'
+        run: cargo build --release
+
+      # ── Vercel ────────────────────────────────────────────────────────────
+      - name: Deploy to Vercel (preview)
+        if: inputs.target == 'vercel' && inputs.environment != 'production'
+        run: npx vercel deploy --token=${{ secrets.VERCEL_TOKEN }}
+        env:
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+
+      - name: Deploy to Vercel (production)
+        if: inputs.target == 'vercel' && inputs.environment == 'production'
+        run: npx vercel deploy --prod --token=${{ secrets.VERCEL_TOKEN }}
+        env:
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+
+      # ── Firebase ──────────────────────────────────────────────────────────
+      - name: Deploy to Firebase
+        if: inputs.target == 'firebase'
+        uses: FirebaseExtended/action-hosting-deploy@v0
+        with:
+          repoToken: ${{ secrets.GITHUB_TOKEN }}
+          firebaseServiceAccount: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          channelId: ${{ inputs.environment == 'production' && 'live' || 'preview' }}
+
+      # ── Docker ────────────────────────────────────────────────────────────
+      - name: Log in to registry
+        if: inputs.target == 'docker'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ inputs.docker_registry }}
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Build and push Docker image
+        if: inputs.target == 'docker'
+        uses: docker/build-push-action@v5
+        with:
+          context: ${{ inputs.working_directory }}
+          push: true
+          tags: |
+            ${{ inputs.docker_image }}:${{ inputs.environment }}
+            ${{ inputs.docker_image }}:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # ── SSH ───────────────────────────────────────────────────────────────
+      - name: Setup SSH key
+        if: inputs.target == 'ssh'
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      - name: Deploy via SSH
+        if: inputs.target == 'ssh'
+        shell: bash
+        run: |
+          TYPE="${{ steps.detect.outputs.type }}"
+          rsync -az --delete \
+            --exclude='.git' --exclude='node_modules' --exclude='__pycache__' \
+            ./ ${{ inputs.ssh_user }}@${{ inputs.ssh_host }}:${{ inputs.ssh_deploy_path }}/
+
+          ssh ${{ inputs.ssh_user }}@${{ inputs.ssh_host }} bash <<EOF
+            cd ${{ inputs.ssh_deploy_path }}
+            if   [ "$TYPE" = "node" ];   then npm ci --omit=dev && pm2 restart all || true
+            elif [ "$TYPE" = "python" ]; then pip install -r requirements.txt && systemctl restart app || true
+            elif [ "$TYPE" = "dotnet" ]; then systemctl restart app || true
+            elif [ "$TYPE" = "go" ];     then systemctl restart app || true
+            fi
+          EOF
+
+      # ── Azure Web App ─────────────────────────────────────────────────────
+      - name: Deploy to Azure Web App (dotnet)
+        if: inputs.target == 'azure' && steps.detect.outputs.type == 'dotnet'
+        uses: azure/webapps-deploy@v3
+        with:
+          app-name: ${{ inputs.azure_app_name }}
+          publish-profile: ${{ secrets.AZURE_PUBLISH_PROFILE }}
+          package: publish/
+
+      - name: Deploy to Azure Web App (node)
+        if: inputs.target == 'azure' && steps.detect.outputs.type == 'node'
+        uses: azure/webapps-deploy@v3
+        with:
+          app-name: ${{ inputs.azure_app_name }}
+          publish-profile: ${{ secrets.AZURE_PUBLISH_PROFILE }}
+          package: .
+
+      - name: Deploy to Azure Web App (python)
+        if: inputs.target == 'azure' && steps.detect.outputs.type == 'python'
+        uses: azure/webapps-deploy@v3
+        with:
+          app-name: ${{ inputs.azure_app_name }}
+          publish-profile: ${{ secrets.AZURE_PUBLISH_PROFILE }}
+          package: .
